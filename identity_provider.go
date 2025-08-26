@@ -8,14 +8,13 @@ import (
 	"encoding/base64"
 	"encoding/xml"
 	"fmt"
+	"html/template"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strconv"
-	"text/template"
 	"time"
 
 	"github.com/beevik/etree"
@@ -38,13 +37,14 @@ type Session struct {
 	NameIDFormat string
 	SubjectID    string
 
-	Groups                []string
-	UserName              string
-	UserEmail             string
-	UserCommonName        string
-	UserSurname           string
-	UserGivenName         string
-	UserScopedAffiliation string
+	Groups                 []string
+	UserName               string
+	UserEmail              string
+	UserCommonName         string
+	UserSurname            string
+	UserGivenName          string
+	UserScopedAffiliation  string
+	EduPersonPrincipalName string `json:",omitempty"`
 
 	CustomAttributes []Attribute
 }
@@ -95,17 +95,20 @@ type AssertionMaker interface {
 // and password).
 type IdentityProvider struct {
 	Key                     crypto.PrivateKey
+	Signer                  crypto.Signer
 	Logger                  logger.Interface
 	Certificate             *x509.Certificate
 	Intermediates           []*x509.Certificate
 	MetadataURL             string // allow metadata as string not only url.URL
 	SSOURL                  url.URL
+	LoginURL                url.URL
 	LogoutURL               url.URL
 	ServiceProviderProvider ServiceProviderProvider
 	SessionProvider         SessionProvider
 	AssertionMaker          AssertionMaker
 	SignatureMethod         string
 	ValidDuration           *time.Duration
+	ResponseFormTemplate    *template.Template
 }
 
 // Metadata returns the metadata structure for this identity provider.
@@ -174,7 +177,7 @@ func (idp *IdentityProvider) Metadata() *EntityDescriptor {
 	}
 
 	if idp.LogoutURL.String() != "" {
-		ed.IDPSSODescriptors[0].SSODescriptor.SingleLogoutServices = []Endpoint{
+		ed.IDPSSODescriptors[0].SingleLogoutServices = []Endpoint{
 			{
 				Binding:  HTTPRedirectBinding,
 				Location: idp.LogoutURL.String(),
@@ -370,7 +373,7 @@ func NewIdpAuthnRequest(idp *IdentityProvider, r *http.Request) (*IdpAuthnReques
 		if err != nil {
 			return nil, ErrInvalidSAMLRequest.WithErrorf(err, "cannot decode request")
 		}
-		req.RequestBuffer, err = ioutil.ReadAll(newSaferFlateReader(bytes.NewReader(compressedRequest)))
+		req.RequestBuffer, err = io.ReadAll(newSaferFlateReader(bytes.NewReader(compressedRequest)))
 		if err != nil {
 			return nil, ErrInvalidSAMLRequest.WithErrorf(err, "cannot decompress request")
 		}
@@ -752,12 +755,32 @@ func (DefaultAssertionMaker) MakeAssertion(req *IdpAuthnRequest, session *Sessio
 
 	if session.UserEmail != "" {
 		attributes = append(attributes, Attribute{
+			FriendlyName: "mail",
+			Name:         "urn:oid:0.9.2342.19200300.100.1.3",
+			NameFormat:   "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
+			Values: []AttributeValue{{
+				Type:  "xs:string",
+				Value: session.UserEmail,
+			}},
+		})
+	}
+	if session.EduPersonPrincipalName != "" || session.UserEmail != "" {
+		value := session.EduPersonPrincipalName
+		if value == "" {
+			// We used to set eduPersonPrincipalName (urn:oid:1.3.6.1.4.1.5923.1.1.1.6)
+			// to the value of session.UserEmail. It is more correct to set
+			// mail (urn:oid:0.9.2342.19200300.100.1.3). To avoid breaking things,
+			// we preserve the former behavior.
+			value = session.UserEmail
+		}
+
+		attributes = append(attributes, Attribute{
 			FriendlyName: "eduPersonPrincipalName",
 			Name:         "urn:oid:1.3.6.1.4.1.5923.1.1.1.6",
 			NameFormat:   "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
 			Values: []AttributeValue{{
 				Type:  "xs:string",
-				Value: session.UserEmail,
+				Value: value,
 			}},
 		})
 	}
@@ -798,7 +821,7 @@ func (DefaultAssertionMaker) MakeAssertion(req *IdpAuthnRequest, session *Sessio
 
 	if session.UserScopedAffiliation != "" {
 		attributes = append(attributes, Attribute{
-			FriendlyName: "uid",
+			FriendlyName: "scopedAffiliation",
 			Name:         "urn:oid:1.3.6.1.4.1.5923.1.1.1.9",
 			NameFormat:   "urn:oasis:names:tc:SAML:2.0:attrname-format:uri",
 			Values: []AttributeValue{{
@@ -920,24 +943,8 @@ const canonicalizerPrefixList = ""
 
 // MakeAssertionEl sets `AssertionEl` to a signed, possibly encrypted, version of `Assertion`.
 func (req *IdpAuthnRequest) MakeAssertionEl() error {
-	keyPair := tls.Certificate{
-		Certificate: [][]byte{req.IDP.Certificate.Raw},
-		PrivateKey:  req.IDP.Key,
-		Leaf:        req.IDP.Certificate,
-	}
-	for _, cert := range req.IDP.Intermediates {
-		keyPair.Certificate = append(keyPair.Certificate, cert.Raw)
-	}
-	keyStore := dsig.TLSCertKeyStore(keyPair)
-
-	signatureMethod := req.IDP.SignatureMethod
-	if signatureMethod == "" {
-		signatureMethod = dsig.RSASHA1SignatureMethod
-	}
-
-	signingContext := dsig.NewDefaultSigningContext(keyStore)
-	signingContext.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList(canonicalizerPrefixList)
-	if err := signingContext.SetSignatureMethod(signatureMethod); err != nil {
+	signingContext, err := req.signingContext()
+	if err != nil {
 		return err
 	}
 
@@ -1026,6 +1033,16 @@ func (req *IdpAuthnRequest) PostBinding() (IdpAuthnRequestForm, error) {
 	return form, nil
 }
 
+var defaultResponseFormTemplate = template.Must(template.New("saml-post-form").Parse(`<html>` +
+	`<form method="post" action="{{.URL}}" id="SAMLResponseForm">` +
+	`<input type="hidden" name="SAMLResponse" value="{{.SAMLResponse}}" />` +
+	`<input type="hidden" name="RelayState" value="{{.RelayState}}" />` +
+	`<input id="SAMLSubmitButton" type="submit" value="Continue" />` +
+	`</form>` +
+	`<script>document.getElementById('SAMLSubmitButton').style.visibility='hidden';</script>` +
+	`<script>document.getElementById('SAMLResponseForm').submit();</script>` +
+	`</html>`))
+
 // WriteResponse writes the `Response` to the http.ResponseWriter. If
 // `Response` is not already set, it calls MakeResponse to produce it.
 func (req *IdpAuthnRequest) WriteResponse(w http.ResponseWriter) error {
@@ -1034,15 +1051,10 @@ func (req *IdpAuthnRequest) WriteResponse(w http.ResponseWriter) error {
 		return err
 	}
 
-	tmpl := template.Must(template.New("saml-post-form").Parse(`<html>` +
-		`<form method="post" action="{{.URL}}" id="SAMLResponseForm">` +
-		`<input type="hidden" name="SAMLResponse" value="{{.SAMLResponse}}" />` +
-		`<input type="hidden" name="RelayState" value="{{.RelayState}}" />` +
-		`<input id="SAMLSubmitButton" type="submit" value="Continue" />` +
-		`</form>` +
-		`<script>document.getElementById('SAMLSubmitButton').style.visibility='hidden';</script>` +
-		`<script>document.getElementById('SAMLResponseForm').submit();</script>` +
-		`</html>`))
+	tmpl := req.IDP.ResponseFormTemplate
+	if tmpl == nil {
+		tmpl = defaultResponseFormTemplate
+	}
 
 	buf := bytes.NewBuffer(nil)
 	if err := tmpl.Execute(buf, form); err != nil {
@@ -1138,24 +1150,8 @@ func (req *IdpAuthnRequest) MakeResponse() error {
 
 	// Sign the response element (we've already signed the Assertion element)
 	{
-		keyPair := tls.Certificate{
-			Certificate: [][]byte{req.IDP.Certificate.Raw},
-			PrivateKey:  req.IDP.Key,
-			Leaf:        req.IDP.Certificate,
-		}
-		for _, cert := range req.IDP.Intermediates {
-			keyPair.Certificate = append(keyPair.Certificate, cert.Raw)
-		}
-		keyStore := dsig.TLSCertKeyStore(keyPair)
-
-		signatureMethod := req.IDP.SignatureMethod
-		if signatureMethod == "" {
-			signatureMethod = dsig.RSASHA1SignatureMethod
-		}
-
-		signingContext := dsig.NewDefaultSigningContext(keyStore)
-		signingContext.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList(canonicalizerPrefixList)
-		if err := signingContext.SetSignatureMethod(signatureMethod); err != nil {
+		signingContext, err := req.signingContext()
+		if err != nil {
 			return err
 		}
 
@@ -1172,4 +1168,45 @@ func (req *IdpAuthnRequest) MakeResponse() error {
 
 	req.ResponseEl = responseEl
 	return nil
+}
+
+// signingContext will create a signing context for the request.
+func (req *IdpAuthnRequest) signingContext() (*dsig.SigningContext, error) {
+	// Create a cert chain based off of the IDP cert and its intermediates.
+	certificates := [][]byte{req.IDP.Certificate.Raw}
+	for _, cert := range req.IDP.Intermediates {
+		certificates = append(certificates, cert.Raw)
+	}
+
+	var signingContext *dsig.SigningContext
+	var err error
+	// If signer is set, use it instead of the private key.
+	if req.IDP.Signer != nil {
+		signingContext, err = dsig.NewSigningContext(req.IDP.Signer, certificates)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		keyPair := tls.Certificate{
+			Certificate: certificates,
+			PrivateKey:  req.IDP.Key,
+			Leaf:        req.IDP.Certificate,
+		}
+		keyStore := dsig.TLSCertKeyStore(keyPair)
+
+		signingContext = dsig.NewDefaultSigningContext(keyStore)
+	}
+
+	// Default to using SHA1 if the signature method isn't set.
+	signatureMethod := req.IDP.SignatureMethod
+	if signatureMethod == "" {
+		signatureMethod = dsig.RSASHA1SignatureMethod
+	}
+
+	signingContext.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList(canonicalizerPrefixList)
+	if err := signingContext.SetSignatureMethod(signatureMethod); err != nil {
+		return nil, err
+	}
+
+	return signingContext, nil
 }
