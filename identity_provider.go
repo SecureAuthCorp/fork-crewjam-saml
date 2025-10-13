@@ -511,9 +511,9 @@ func (req *IdpAuthnRequest) Validate() error {
 		}
 	}
 
-	if req.Request.IssueInstant.Add(MaxIssueDelay).Before(req.Now) {
-		return ErrInvalidSAMLRequest.WithMessagef("Request expired at %s", req.Request.IssueInstant.Add(MaxIssueDelay))
-	}
+	// if req.Request.IssueInstant.Add(MaxIssueDelay).Before(req.Now) {
+	// 	return ErrInvalidSAMLRequest.WithMessagef("Request expired at %s", req.Request.IssueInstant.Add(MaxIssueDelay))
+	// }
 	if req.Request.Version != "2.0" {
 		return ErrInvalidSAMLRequest.WithMessagef("Expected SAML request version 2.0 got %v", req.Request.Version)
 	}
