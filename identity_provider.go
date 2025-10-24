@@ -356,6 +356,7 @@ type IdpAuthnRequest struct {
 	Now                             time.Time
 	IDPInitiated                    bool
 	LookupSPByACSWithIssuerFallback bool
+	AcceptACSFromRequest            bool
 }
 
 // NewIdpAuthnRequest returns a new IdpAuthnRequest for the given HTTP request to the authorization
@@ -551,6 +552,51 @@ func (req *IdpAuthnRequest) Validate() error {
 }
 
 func (req *IdpAuthnRequest) getACSEndpoint() error {
+	if req.AcceptACSFromRequest && req.Request.AssertionConsumerServiceURL != "" {
+		// Find the appropriate binding from SP metadata, preferring the default ACS endpoint
+		var binding string = HTTPPostBinding // fallback to POST binding
+		var spssoDescriptor *SPSSODescriptor
+
+		// Look for the default ACS endpoint first
+		for _, desc := range req.ServiceProviderMetadata.SPSSODescriptors {
+			for _, acs := range desc.AssertionConsumerServices {
+				if acs.IsDefault != nil && *acs.IsDefault {
+					binding = acs.Binding
+					spssoDescriptor = &desc
+					break
+				}
+			}
+			if spssoDescriptor != nil {
+				break
+			}
+		}
+
+		// If no default found, use the first ACS endpoint
+		if spssoDescriptor == nil && len(req.ServiceProviderMetadata.SPSSODescriptors) > 0 {
+			desc := req.ServiceProviderMetadata.SPSSODescriptors[0]
+			if len(desc.AssertionConsumerServices) > 0 {
+				binding = desc.AssertionConsumerServices[0].Binding
+				spssoDescriptor = &desc
+			} else {
+				spssoDescriptor = &desc
+			}
+		}
+
+		// Fallback to minimal descriptor if none found
+		if spssoDescriptor == nil {
+			spssoDescriptor = &SPSSODescriptor{}
+		}
+
+		// Create a synthetic ACS endpoint from the request URL with the discovered binding
+		req.ACSEndpoint = &IndexedEndpoint{
+			Location: req.Request.AssertionConsumerServiceURL,
+			Binding:  binding,
+		}
+		req.SPSSODescriptor = spssoDescriptor
+
+		return nil
+	}
+
 	if req.Request.AssertionConsumerServiceIndex != "" {
 		for _, spssoDescriptor := range req.ServiceProviderMetadata.SPSSODescriptors {
 			for _, spAssertionConsumerService := range spssoDescriptor.AssertionConsumerServices {
