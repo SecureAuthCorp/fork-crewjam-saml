@@ -109,6 +109,7 @@ type IdentityProvider struct {
 	SignatureMethod         string
 	ValidDuration           *time.Duration
 	ResponseFormTemplate    *template.Template
+	AcceptACSFromRequest    bool
 }
 
 // Metadata returns the metadata structure for this identity provider.
@@ -363,9 +364,10 @@ type IdpAuthnRequest struct {
 // service.
 func NewIdpAuthnRequest(idp *IdentityProvider, r *http.Request) (*IdpAuthnRequest, error) {
 	req := &IdpAuthnRequest{
-		IDP:         idp,
-		HTTPRequest: r,
-		Now:         TimeNow(),
+		IDP:                  idp,
+		HTTPRequest:          r,
+		Now:                  TimeNow(),
+		AcceptACSFromRequest: idp.AcceptACSFromRequest,
 	}
 
 	switch r.Method {
