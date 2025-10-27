@@ -364,6 +364,8 @@ type IdpAuthnRequest struct {
 // NewIdpAuthnRequest returns a new IdpAuthnRequest for the given HTTP request to the authorization
 // service.
 func NewIdpAuthnRequest(idp *IdentityProvider, r *http.Request) (*IdpAuthnRequest, error) {
+	logrus.Infof("XXX NewIdpAuthnRequest, allowACSFromRequest: %v", idp.AcceptACSFromRequest)
+
 	req := &IdpAuthnRequest{
 		IDP:                  idp,
 		HTTPRequest:          r,
