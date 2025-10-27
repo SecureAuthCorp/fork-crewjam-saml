@@ -1286,3 +1286,233 @@ func TestIDPHTTPCanHandleSSORequest(t *testing.T) {
 		assert.Check(t, is.Equal(http.StatusBadRequest, w.Code))
 	}
 }
+
+func TestGetACSEndpoint(t *testing.T) {
+	tests := []struct {
+		name                  string
+		acceptACSFromRequest  bool
+		requestedACSURL       string
+		requestedACSIndex     string
+		spMetadata            *EntityDescriptor
+		expectedLocation      string
+		expectedBinding       string
+		expectedError         bool
+		expectedErrorContains string
+	}{
+		{
+			name:                 "AcceptACSFromRequest with default binding",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "https://example.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:   HTTPPostBinding,
+								Location:  "https://sp.example.com/acs",
+								IsDefault: &[]bool{true}[0],
+								Index:     0,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://example.com/acs",
+			expectedBinding:  HTTPPostBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest with redirect binding from default",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "https://custom.com/saml/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:   HTTPRedirectBinding,
+								Location:  "https://sp.example.com/acs",
+								IsDefault: &[]bool{true}[0],
+								Index:     0,
+							},
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/acs-post",
+								Index:    1,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://custom.com/saml/acs",
+			expectedBinding:  HTTPRedirectBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest with fallback to first binding",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "https://fallback.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:  "urn:oasis:names:tc:SAML:2.0:bindings:SOAP",
+								Location: "https://sp.example.com/soap",
+								Index:    0,
+							},
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/post",
+								Index:    1,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://fallback.com/acs",
+			expectedBinding:  "urn:oasis:names:tc:SAML:2.0:bindings:SOAP",
+		},
+		{
+			name:                 "AcceptACSFromRequest with no ACS endpoints fallback to POST",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "https://noacs.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{},
+					},
+				},
+			},
+			expectedLocation: "https://noacs.com/acs",
+			expectedBinding:  HTTPPostBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest with empty SP metadata",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "https://empty.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{},
+			},
+			expectedLocation: "https://empty.com/acs",
+			expectedBinding:  HTTPPostBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest disabled, normal validation by URL",
+			acceptACSFromRequest: false,
+			requestedACSURL:      "https://sp.example.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/acs",
+								Index:    0,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://sp.example.com/acs",
+			expectedBinding:  HTTPPostBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest disabled, normal validation by index",
+			acceptACSFromRequest: false,
+			requestedACSIndex:    "1",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:  HTTPRedirectBinding,
+								Location: "https://sp.example.com/acs-redirect",
+								Index:    0,
+							},
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/acs-post",
+								Index:    1,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://sp.example.com/acs-post",
+			expectedBinding:  HTTPPostBinding,
+		},
+		{
+			name:                 "AcceptACSFromRequest disabled, URL not in metadata",
+			acceptACSFromRequest: false,
+			requestedACSURL:      "https://unauthorized.com/acs",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/acs",
+								Index:    0,
+							},
+						},
+					},
+				},
+			},
+			expectedError:         true,
+			expectedErrorContains: "file does not exist",
+		},
+		{
+			name:                 "AcceptACSFromRequest enabled but empty URL",
+			acceptACSFromRequest: true,
+			requestedACSURL:      "",
+			requestedACSIndex:    "0",
+			spMetadata: &EntityDescriptor{
+				SPSSODescriptors: []SPSSODescriptor{
+					{
+						AssertionConsumerServices: []IndexedEndpoint{
+							{
+								Binding:  HTTPPostBinding,
+								Location: "https://sp.example.com/acs",
+								Index:    0,
+							},
+						},
+					},
+				},
+			},
+			expectedLocation: "https://sp.example.com/acs",
+			expectedBinding:  HTTPPostBinding,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a minimal IDP request for testing
+			req := &IdpAuthnRequest{
+				AcceptACSFromRequest:    tt.acceptACSFromRequest,
+				ServiceProviderMetadata: tt.spMetadata,
+				Request: AuthnRequest{
+					AssertionConsumerServiceURL:   tt.requestedACSURL,
+					AssertionConsumerServiceIndex: tt.requestedACSIndex,
+				},
+			}
+
+			err := req.getACSEndpoint()
+
+			if tt.expectedError {
+				assert.Check(t, err != nil, "Expected error but got none")
+				if tt.expectedErrorContains != "" {
+					assert.Check(t, strings.Contains(err.Error(), tt.expectedErrorContains),
+						"Expected error to contain %q, got %q", tt.expectedErrorContains, err.Error())
+				}
+				return
+			}
+
+			assert.Check(t, err, "Unexpected error: %v", err)
+			assert.Check(t, req.ACSEndpoint != nil, "ACSEndpoint should not be nil")
+			assert.Check(t, is.Equal(tt.expectedLocation, req.ACSEndpoint.Location),
+				"Expected location %q, got %q", tt.expectedLocation, req.ACSEndpoint.Location)
+			assert.Check(t, is.Equal(tt.expectedBinding, req.ACSEndpoint.Binding),
+				"Expected binding %q, got %q", tt.expectedBinding, req.ACSEndpoint.Binding)
+			assert.Check(t, req.SPSSODescriptor != nil, "SPSSODescriptor should not be nil")
+		})
+	}
+}
