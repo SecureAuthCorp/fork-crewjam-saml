@@ -22,6 +22,7 @@ import (
 	"github.com/crewjam/saml/xmlenc"
 	xrv "github.com/mattermost/xml-roundtrip-validator"
 	dsig "github.com/russellhaering/goxmldsig"
+	"github.com/sirupsen/logrus"
 )
 
 // Session represents a user session. It is returned by the
@@ -554,7 +555,10 @@ func (req *IdpAuthnRequest) Validate() error {
 }
 
 func (req *IdpAuthnRequest) getACSEndpoint() error {
+	logrus.Infof("XXX AcceptACSFromRequest: %v, acs: %s", req.AcceptACSFromRequest, req.Request.AssertionConsumerServiceURL)
+
 	if req.AcceptACSFromRequest && req.Request.AssertionConsumerServiceURL != "" {
+		logrus.Info("XXX 1")
 		// Find the appropriate binding from SP metadata, preferring the default ACS endpoint
 		var binding string = HTTPPostBinding // fallback to POST binding
 		var spssoDescriptor *SPSSODescriptor
@@ -562,13 +566,17 @@ func (req *IdpAuthnRequest) getACSEndpoint() error {
 		// Look for the default ACS endpoint first
 		for _, desc := range req.ServiceProviderMetadata.SPSSODescriptors {
 			for _, acs := range desc.AssertionConsumerServices {
+				logrus.Info("XXX 2")
 				if acs.IsDefault != nil && *acs.IsDefault {
+
+					logrus.Info("XXX 2.1")
 					binding = acs.Binding
 					spssoDescriptor = &desc
 					break
 				}
 			}
 			if spssoDescriptor != nil {
+				logrus.Info("XXX 2.2")
 				break
 			}
 		}
@@ -577,15 +585,20 @@ func (req *IdpAuthnRequest) getACSEndpoint() error {
 		if spssoDescriptor == nil && len(req.ServiceProviderMetadata.SPSSODescriptors) > 0 {
 			desc := req.ServiceProviderMetadata.SPSSODescriptors[0]
 			if len(desc.AssertionConsumerServices) > 0 {
+
+				logrus.Info("XXX 3")
 				binding = desc.AssertionConsumerServices[0].Binding
 				spssoDescriptor = &desc
 			} else {
+
+				logrus.Info("XXX 3 else")
 				spssoDescriptor = &desc
 			}
 		}
 
 		// Fallback to minimal descriptor if none found
 		if spssoDescriptor == nil {
+			logrus.Info("XXX 4")
 			spssoDescriptor = &SPSSODescriptor{}
 		}
 
@@ -595,6 +608,8 @@ func (req *IdpAuthnRequest) getACSEndpoint() error {
 			Binding:  binding,
 		}
 		req.SPSSODescriptor = spssoDescriptor
+
+		logrus.Infof("XXX 4fallback, binding: %s", binding)
 
 		return nil
 	}
